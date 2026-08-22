@@ -74,6 +74,21 @@ inline uint32_t htole32(uint32_t x) { return x; }
 inline uint32_t le32toh(uint32_t x) { return x; }
 #endif
 
+#ifdef _WIN32
+// MSVCRT/UCRT's fopen does not understand the glibc "e" mode character
+// (O_CLOEXEC). We gate it per platform instead of dropping it outright, so
+// POSIX builds keep close-on-exec, and Windows builds get explicit binary
+// mode, which it needs since text mode does CRLF translation that would
+// corrupt tag data and Ogg streams.
+
+# define OT_FOPEN_RE "rb"
+# define OT_FOPEN_WE "wb"
+# define OT_FOPEN_W "wb"
+#else
+# define OT_FOPEN_RE "re"
+# define OT_FOPEN_WE "we"
+# define OT_FOPEN_W "w"
+#endif
 
 using namespace std::literals;
 

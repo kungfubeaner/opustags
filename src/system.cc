@@ -40,6 +40,7 @@ void ot::partial_file::open(const char* destination)
 		              strerror(errno)};
 }
 
+#ifndef _WIN32
 static mode_t get_umask()
 {
 	// libc doesn’t seem to provide a way to get umask without changing it, so we need this workaround.
@@ -72,13 +73,27 @@ static void copy_permissions(const char* source, const char* dest)
 	if (chmod(dest, target_mode) == -1)
 		fprintf(stderr, "warning: Could not set mode of %s: %s\n", dest, strerror(errno));
 }
+#endif
 
 void ot::partial_file::commit()
 {
 	if (file == nullptr)
 		return;
 	file.reset();
+#ifndef _WIN32
+	// Windows does not use Unix-style file modes; the temporary file already has the correct
+	// default permissions. On Unix, we copy the original file's permissions.
 	copy_permissions(final_name.c_str(), temporary_name.c_str());
+#endif
+
+#ifdef _WIN32
+	// Windows rename() refuses to overwrite an existing file
+	if (remove(final_name.c_str()) != 0 && errno != ENOENT) {
+		throw status {st::standard_error,
+		              "Could not remove original file '" + final_name + "': " +
+		              strerror(errno) + "."};
+	}
+#endif
 	if (rename(temporary_name.c_str(), final_name.c_str()) == -1)
 		throw status {st::standard_error,
 		              "Could not move the result file '" + temporary_name + "' to '" +
