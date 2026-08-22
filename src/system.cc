@@ -16,8 +16,117 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <unistd.h>
+
+#ifdef _WIN32
+#include <io.h>
+#include <fcntl.h>
+#include <share.h>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include "win32_compat.h"
+#else
+#include <sys/wait.h>
+#endif
+
+#ifdef _WIN32
+// getdelim() and mkstemps() are POSIX/BSD extensions the MSVCRT/UCRT does
+// not provide. HAVE_GETDELIM / HAVE_MKSTEMPS are defined by CMake via
+// check_function_exists() when the target runtime already has them, so
+// these definitions only compile in when actually needed, rather than
+// relying on a macro-name guard that can't detect a real function.
+//
+// These are scoped to Windows only and match the real functions' exact
+// signatures, so they're drop-in replacements: ot::read_comments() in
+// cli.cc calls getdelim() exactly the same way on every platform, and
+// this file is the only place that changes.
+
+#ifndef HAVE_GETDELIM
+ssize_t getdelim(char** lineptr, size_t* n, int delim, FILE* stream)
+{
+	if (lineptr == nullptr || n == nullptr || stream == nullptr) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	// Accumulate into a std::string, which grows itself, rather than
+	// manually doubling a malloc'd buffer by hand. We still hand the
+	// result back through the caller's malloc'd buffer at the end, since
+	// that's the contract getdelim() callers (and free()) expect.
+	std::string buffer;
+	int c;
+	while ((c = fgetc(stream)) != EOF) {
+		buffer.push_back(static_cast<char>(c));
+		if (c == delim)
+			break;
+	}
+	if (buffer.empty())
+		return -1; // Nothing left to read.
+
+   size_t needed = buffer.size() + 1; // +1 for the null terminator.
+   if (*lineptr == nullptr || *n < needed) {
+   	char* newbuf = static_cast<char*>(realloc(*lineptr, needed));
+   	if (newbuf == nullptr) {
+   		errno = ENOMEM;
+   		return -1;
+   	}
+   	*lineptr = newbuf;
+   	*n = needed;
+   }
+	memcpy(*lineptr, buffer.data(), buffer.size());
+	(*lineptr)[buffer.size()] = '\0';
+	return static_cast<ssize_t>(buffer.size());
+}
+#endif // HAVE_GETDELIM
+
+#ifndef HAVE_MKSTEMPS
+int mkstemps(char* tmpl, int suffixlen)
+{
+	size_t len = strlen(tmpl);
+	if (suffixlen < 0 || len < static_cast<size_t>(6 + suffixlen))
+		return -1;
+	size_t placeholder_end = len - static_cast<size_t>(suffixlen);
+
+	// _mktemp_s requires the "XXXXXX" placeholder to be the last six
+	// characters of the string it operates on, but mkstemps' templates
+	// have a suffix after the placeholder (e.g. ".part"), which _mktemp_s
+	// does not support directly. Work around this by temporarily
+	// truncating the suffix off, letting _mktemp_s fill in the XXXXXX
+	// portion with its own (better than rand()) uniqueness algorithm,
+	// then restoring the suffix.
+
+	// Save the suffix using std::string (no fixed size limit)
+	std::string saved_suffix(tmpl + placeholder_end, suffixlen);
+	tmpl[placeholder_end] = '\0';
+
+	errno_t err = _mktemp_s(tmpl, placeholder_end + 1);
+
+	// Restore the suffix
+	memcpy(tmpl + placeholder_end, saved_suffix.data(), suffixlen);
+	tmpl[len] = '\0';
+
+	if (err != 0) {
+		errno = err;
+		return -1;
+	}
+
+	// _mktemp_s only picks a name, it does not create or open the file, so
+	// the O_CREAT|O_EXCL open below is what actually gives us mkstemps'
+	// atomicity guarantee (the name didn't exist and now it's ours).
+
+	int fd;
+	if (_sopen_s(&fd, tmpl, _O_CREAT | _O_EXCL | _O_RDWR | _O_BINARY, _SH_DENYNO,
+	             _S_IREAD | _S_IWRITE) != 0)
+		return -1;
+	return fd;
+}
+#endif // HAVE_MKSTEMPS
+#endif // _WIN32
 
 void ot::close_file(FILE* file)
 {
@@ -81,8 +190,8 @@ void ot::partial_file::commit()
 		return;
 	file.reset();
 #ifndef _WIN32
-	// Windows does not use Unix-style file modes; the temporary file already has the correct
-	// default permissions. On Unix, we copy the original file's permissions.
+   // Windows does not use Unix-style file modes; the temporary file already has the correct
+   // default permissions. On Unix, we copy the original file's permissions.
 	copy_permissions(final_name.c_str(), temporary_name.c_str());
 #endif
 
@@ -234,6 +343,34 @@ std::string ot::decode_utf8(std::u8string_view in)
 
 std::string ot::shell_escape(std::string_view word)
 {
+#ifdef _WIN32
+	if (!word.empty() && word.find_first_of(" \t\n\v\"") == std::string_view::npos)
+		return std::string(word);
+
+	std::string escaped = "\"";
+	for (auto it = word.begin();; ++it) {
+		unsigned backslashes = 0;
+		while (it != word.end() && *it == '\\') {
+			++backslashes;
+			++it;
+		}
+		if (it == word.end()) {
+			// Escape all backslashes, since they're followed by the closing quote.
+			escaped.append(backslashes * 2, '\\');
+			break;
+		} else if (*it == '"') {
+			// Escape all backslashes and the quote itself.
+			escaped.append(backslashes * 2 + 1, '\\');
+			escaped += '"';
+		} else {
+			// Backslashes aren't special here.
+			escaped.append(backslashes, '\\');
+			escaped += *it;
+		}
+	}
+	escaped += '"';
+	return escaped;
+#else
 	std::string escaped_word;
 	// Pre-allocate the result, assuming most of the time enclosing it in single quotes is enough.
 	escaped_word.reserve(2 + word.size());
@@ -250,13 +387,56 @@ std::string ot::shell_escape(std::string_view word)
 	escaped_word += '\'';
 
 	return escaped_word;
+#endif
 }
+
+#ifdef _WIN32
+/**
+ * Resolve a path to an absolute one using the Win32 API directly, rather
+ * than std::filesystem::absolute(). libstdc++'s filesystem implementation
+ * on MinGW does a narrow<->wide character-set conversion internally and
+ * throws filesystem_error on byte sequences it considers "illegal" under
+ * the current locale/codepage -- this was observed to crash on ordinary
+ * accented Latin characters.
+ *
+ * GetFullPathNameA operates on raw bytes with no encoding validation at
+ * all, so it can't fail this way.
+ */
+static std::string win32_absolute_path(std::string_view path)
+{
+	std::string input(path);
+	char buffer[MAX_PATH];
+	DWORD len = GetFullPathNameA(input.c_str(), MAX_PATH, buffer, nullptr);
+	if (len == 0 || len >= MAX_PATH)
+		return input; // Fall back to the original path if resolution fails.
+	return std::string(buffer, len);
+}
+#endif
 
 void ot::run_editor(std::string_view editor, std::string_view path)
 {
+	// Always pass an absolute path to the editor. This is the surest way to
+	// avoid the editor misinterpreting the path as an option if it happens
+	// to start with '-' -- more reliable than "--", which not every editor
+	// respects the same way (observed difference in behavior between
+	// Notepad and Neovim on Windows).
+#ifdef _WIN32
+	std::string abs_path = win32_absolute_path(path);
+	std::string command = std::string(editor) + " " + shell_escape(abs_path);
+#else
 	std::string command = std::string(editor) + " -- " + shell_escape(path);
+#endif
+
 	int status = system(command.c_str());
 
+#ifdef _WIN32
+	// On Windows, system() returns the exit code directly (or -1 on error)
+	if (status == -1)
+		throw ot::status {st::standard_error, "system() error: "s + strerror(errno)};
+	else if (status != 0)
+		throw ot::status {st::child_process_failed,
+		                  "Child process exited with " + std::to_string(status)};
+#else
 	if (status == -1)
 		throw ot::status {st::standard_error, "waitpid error: "s + strerror(errno)};
 	else if (!WIFEXITED(status))
@@ -265,6 +445,7 @@ void ot::run_editor(std::string_view editor, std::string_view path)
 	else if (WEXITSTATUS(status) != 0)
 		throw ot::status {st::child_process_failed,
 		                  "Child process exited with " + std::to_string(WEXITSTATUS(status))};
+#endif
 }
 
 timespec ot::get_file_timestamp(const char* path)
@@ -277,6 +458,9 @@ timespec ot::get_file_timestamp(const char* path)
 	mtime = st.st_mtim;
 #elif defined(HAVE_STAT_ST_MTIMESPEC)
 	mtime = st.st_mtimespec;
+#elif defined(_WIN32)
+	mtime.tv_sec = st.st_mtime;
+	mtime.tv_nsec = 0;
 #else
 	mtime.tv_sec = st.st_mtime;
 	mtime.tv_nsec = st.st_mtimensec;

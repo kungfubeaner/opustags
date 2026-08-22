@@ -30,6 +30,21 @@ include(CheckStructHasMember)
 check_struct_has_member("struct stat" st_mtim sys/stat.h HAVE_STAT_ST_MTIM LANGUAGE CXX)
 check_struct_has_member("struct stat" st_mtimespec sys/stat.h HAVE_STAT_ST_MTIMESPEC LANGUAGE CXX)
 
+# getdelim and mkstemps are POSIX/BSD extensions that MSVCRT/UCRT does not
+# provide. win32_compat.h supplies fallback implementations, scoped to
+# Windows only, guarded by these HAVE_* macros so we only compile them in
+# when the target runtime doesn't already have the real thing.
+
+include(CheckFunctionExists)
+check_function_exists(getdelim HAVE_GETDELIM)
+check_function_exists(mkstemps HAVE_MKSTEMPS)
+if(HAVE_GETDELIM)
+	add_definitions(-DHAVE_GETDELIM)
+endif()
+if(HAVE_MKSTEMPS)
+	add_definitions(-DHAVE_MKSTEMPS)
+endif()
+
 configure_file(src/config.h.in config.h @ONLY)
 include_directories(BEFORE src "${CMAKE_BINARY_DIR}" ${OGG_INCLUDE_DIRS} ${Iconv_INCLUDE_DIRS})
 
