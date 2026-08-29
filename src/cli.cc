@@ -20,6 +20,7 @@
 #ifdef _WIN32
 #include <io.h>
 #include <fcntl.h>
+#include "win32_compat.h"
 #endif
 
 static const char help_message[] =
