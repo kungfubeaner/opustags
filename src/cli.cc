@@ -20,7 +20,6 @@
 #ifdef _WIN32
 #include <io.h>
 #include <fcntl.h>
-#include "win32_compat.h"
 #endif
 
 static const char help_message[] =
@@ -448,7 +447,7 @@ static void edit_tags_interactively(ot::opus_tags& tags, const std::optional<std
 	}
 
 	// Applying the new tags.
-	tags_file = fopen(tags_path.c_str(), OT_FOPEN_RE);
+	tags_file = fopen(tags_path.c_str(), "rb" OT_FOPEN_CLOEXEC);
 	if (tags_file == nullptr)
 		throw ot::status {ot::st::standard_error, "Error opening " + tags_path + ": " + strerror(errno)};
 	try {
@@ -485,7 +484,7 @@ static void output_cover(const ot::opus_tags& tags, const ot::options &opt)
 			throw ot::status {ot::st::error, "Could not identify '" + opt.cover_out.value() + "': " + strerror(errno)};
 		}
 
-		output = fopen(opt.cover_out->c_str(), OT_FOPEN_W);
+		output = fopen(opt.cover_out->c_str(), "wb" OT_FOPEN_CLOEXEC);
 		if (output == nullptr)
 			throw ot::status {ot::st::standard_error, "Could not open '" + opt.cover_out.value() + "' for writing: " + strerror(errno)};
 	}
@@ -563,7 +562,7 @@ static void run_single(const ot::options& opt, const std::string& path_in, const
 	ot::file input;
 	if (path_in == "-")
 		input = stdin;
-	else if ((input = fopen(path_in.c_str(), OT_FOPEN_RE)) == nullptr)
+	else if ((input = fopen(path_in.c_str(), "rb" OT_FOPEN_CLOEXEC)) == nullptr)
 		throw ot::status {ot::st::standard_error,
 		                  "Could not open '" + path_in + "' for reading: " + strerror(errno)};
 	ot::ogg_reader reader(input.get());
@@ -604,7 +603,7 @@ static void run_single(const ot::options& opt, const std::string& path_in, const
 		/* The output file exists. */
 		if (!S_ISREG(output_info.st_mode)) {
 			/* Special files are opened for writing directly. */
-			if ((final_output = fopen(path_out->c_str(), OT_FOPEN_WE)) == nullptr)
+			if ((final_output = fopen(path_out->c_str(), "wb" OT_FOPEN_CLOEXEC)) == nullptr)
 				throw ot::status {ot::st::standard_error,
 				                  "Could not open '" + path_out.value() + "' for writing: " + strerror(errno)};
 			output = final_output.get();

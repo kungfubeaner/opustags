@@ -196,17 +196,46 @@ void ot::partial_file::commit()
 #endif
 
 #ifdef _WIN32
-	// Windows rename() refuses to overwrite an existing file
-	if (remove(final_name.c_str()) != 0 && errno != ENOENT) {
-		throw status {st::standard_error,
-		              "Could not remove original file '" + final_name + "': " +
-		              strerror(errno) + "."};
+	// Windows rename() refuses to overwrite an existing file.
+	std::string backup_name = final_name + ".bak";
+	remove(backup_name.c_str());   // ignore errors (leftover from a previous crash)
+
+	bool had_original = false;
+	if (rename(final_name.c_str(), backup_name.c_str()) == 0) {
+		had_original = true;
+	} else if (errno != ENOENT) {
+		// ENOENT means there was no original file to back up (e.g. this
+		// is a new file), which is fine. Anything else is a real problem.
+		throw status{st::standard_error,
+		             "Could not back up original file '" + final_name + "': " +
+		             strerror(errno) + "."};
 	}
-#endif
+
+	if (rename(temporary_name.c_str(), final_name.c_str()) != 0) {
+		// Failed to install the new file – try to restore the original.
+		if (had_original) {
+			if (rename(backup_name.c_str(), final_name.c_str()) != 0) {
+				throw status{st::standard_error,
+				             "Could not install new file and could not restore original. "
+				             "Original is in '" + backup_name + "', "
+				             "new data is in '" + temporary_name + "': " +
+				             strerror(errno)};
+			}
+		}
+		throw status{st::standard_error,
+		             "Could not move the result file '" + temporary_name + "' to '" +
+		             final_name + "': " + strerror(errno) + "."};
+	}
+
+	// Success – only now is it safe to delete the backup.
+	if (had_original)
+		remove(backup_name.c_str());
+#else
 	if (rename(temporary_name.c_str(), final_name.c_str()) == -1)
-		throw status {st::standard_error,
-		              "Could not move the result file '" + temporary_name + "' to '" +
-		              final_name + "': " + strerror(errno) + "."};
+		throw status{st::standard_error,
+		             "Could not move the result file '" + temporary_name + "' to '" +
+		             final_name + "': " + strerror(errno) + "."};
+#endif
 }
 
 void ot::partial_file::abort()
